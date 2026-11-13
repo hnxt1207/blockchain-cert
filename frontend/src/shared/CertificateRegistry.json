@@ -1,0 +1,8 @@
+[
+  "function admin() view returns (address)",
+  "function issueCertificate(bytes32 _certHash, string _studentId) external",
+  "function revokeCertificate(bytes32 _certHash) external",
+  "function verifyCertificate(bytes32 _certHash) view returns (bool exists, string studentId, uint256 issuedAt, bool isValid)",
+  "event CertificateIssued(bytes32 indexed certHash, string studentId, uint256 issuedAt)",
+  "event CertificateRevoked(bytes32 indexed certHash, uint256 revokedAt)"
+]
