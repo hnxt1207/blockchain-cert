@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
-import { Link } from "react-router-dom";
+﻿import React, { useState, useEffect, useMemo, useRef } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { BrowserProvider, Contract } from "ethers";
+import * as XLSX from "xlsx";
 import {
   LayoutDashboard,
   ListChecks,
@@ -25,19 +26,29 @@ import {
   TrendingUp,
   Award,
   Sparkles,
+  LogOut,
+  Wand2,
+  FileSpreadsheet,
+  Download,
+  Trash2,
 } from "lucide-react";
-import { CONTRACT_ADDRESS, CONTRACT_ABI } from "../shared/contractConfig";
+import { CONTRACT_ADDRESS, CONTRACT_ABI } from "../ket-noi-blockchain/cau-hinh-hop-dong/contractConfig";
 import {
   type CertificateMetadata,
   generateSalt,
   hashCertificateWithSalt,
+  hashMetadataWithSalt,
   encodeOnChainPayload,
-} from "../shared/hashHelper";
+} from "../ket-noi-blockchain/ma-hoa-keccak256/hashHelper";
 import {
   type FullCertificateRecord,
   STORAGE_KEY,
   fetchAllCertificates,
-} from "../shared/certService";
+  saveCertificateToSQL,
+  revokeCertificateInSQL,
+  logoutUser,
+  getCurrentUser,
+} from "../ket-noi-du-lieu/apiService";
 
 declare global {
   interface Window {
@@ -45,8 +56,28 @@ declare global {
   }
 }
 
+function formatLocalDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 type AdminTab = "dashboard" | "manage" | "issue";
+type IssueMode = "single" | "batch";
 type DateFilterPreset = "today" | "7days" | "month" | "all" | "custom";
+
+interface BatchPreviewRow {
+  certCode: string;
+  studentCode: string;
+  recipientName: string;
+  courseName: string;
+  issueDate: string;
+  issuerUnit: string;
+  salt: string;
+  certHash: string;
+  error?: string;
+}
 
 function AdminSidebarMascot({
   mousePos,
@@ -115,7 +146,12 @@ function AdminSidebarMascot({
 }
 
 export default function AdminDashboardLayout() {
+  const navigate = useNavigate();
+  const currentAdmin = getCurrentUser();
+
   const [activeTab, setActiveTab] = useState<AdminTab>("dashboard");
+  const [issueMode, setIssueMode] = useState<IssueMode>("single");
+
   const [walletAddress, setWalletAddress] = useState("");
   const [networkName, setNetworkName] = useState("");
   const [chainId, setChainId] = useState<number | null>(null);
@@ -133,7 +169,7 @@ export default function AdminDashboardLayout() {
     return () => window.removeEventListener("mousemove", handleMove);
   }, []);
 
-  const todayStr = useMemo(() => new Date().toISOString().split("T")[0], []);
+  const todayStr = useMemo(() => formatLocalDate(new Date()), []);
   const [datePreset, setDatePreset] = useState<DateFilterPreset>("all");
   const [customDate, setCustomDate] = useState<string>(todayStr);
   const [topSearch, setTopSearch] = useState("");
@@ -141,18 +177,30 @@ export default function AdminDashboardLayout() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "valid" | "revoked">("all");
 
+  // State cấp đơn lẻ
   const [certCode, setCertCode] = useState("");
+  const [studentCode, setStudentCode] = useState("");
   const [recipientName, setRecipientName] = useState("");
   const [courseName, setCourseName] = useState("");
-  const [issueDate, setIssueDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [issueDate, setIssueDate] = useState(() => formatLocalDate(new Date()));
   const [issuerUnit, setIssuerUnit] = useState("Trường Đại học");
   const [issueFile, setIssueFile] = useState<File | null>(null);
   const [salt, setSalt] = useState("");
   const [issueHash, setIssueHash] = useState("");
   const [copiedKey, setCopiedKey] = useState(false);
 
+  // State cấp hàng loạt từ Excel
+  const [batchFileName, setBatchFileName] = useState("");
+  const [batchRows, setBatchRows] = useState<BatchPreviewRow[]>([]);
+  const [defaultIssuerUnit, setDefaultIssuerUnit] = useState("Trường Đại học");
+
   const [txLoading, setTxLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState<{ type: "success" | "error"; text: string; txHash?: string } | null>(null);
+
+  const handleAdminLogout = () => {
+    logoutUser();
+    navigate("/auth");
+  };
 
   const syncBlockchainData = async () => {
     try {
@@ -202,13 +250,34 @@ export default function AdminDashboardLayout() {
         return;
       }
 
-      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI.abi, provider);
       const onChainAdmin: string = await contract.admin();
       setContractAdminAddress(onChainAdmin);
       setIsAuthorizedAdmin(accounts[0].toLowerCase() === onChainAdmin.toLowerCase());
     } catch (err: any) {
       setStatusMsg({ type: "error", text: err?.message || "Kết nối ví thất bại." });
     }
+  };
+
+  const buildUniqueCertCode = (usedSet: Set<string>, startIndex: number): string => {
+    const year = new Date().getFullYear();
+    let generated = "";
+    let attempt = startIndex;
+    do {
+      const seq = String(attempt).padStart(3, "0");
+      const rand = Math.floor(100 + Math.random() * 900);
+      generated = `CERT-${year}-${seq}${rand}`;
+      attempt++;
+    } while (usedSet.has(generated));
+    usedSet.add(generated);
+    return generated;
+  };
+
+  const handleGenerateCertCode = () => {
+    const existingCodes = new Set(records.map((r) => r.certCode.trim().toUpperCase()));
+    const generated = buildUniqueCertCode(existingCodes, records.length + 1);
+    setCertCode(generated);
+    setStatusMsg(null);
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -221,12 +290,178 @@ export default function AdminDashboardLayout() {
     setIssueHash(hash);
   };
 
-  const handleIssueSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setStatusMsg(null);
+  // =========================================================================
+  // XỬ LÝ FILE EXCEL CHO CẤP PHÁT HÀNG LOẠT (BATCH ISSUANCE)
+  // =========================================================================
+  const handleDownloadExcelTemplate = () => {
+    const sampleData = [
+      {
+        MaChungChi: "",
+        MaSinhVien: "HTTT2311021",
+        HoTen: "Huỳnh Nguyễn Xuân Thi",
+        TenKhoaHoc: "BLOCKCHAIN CĂN BẢN 2026",
+        NgayCap: todayStr,
+        DonViCap: defaultIssuerUnit,
+      },
+      {
+        MaChungChi: "",
+        MaSinhVien: "HTTT2311070",
+        HoTen: "Phan Thanh Trúc",
+        TenKhoaHoc: "BLOCKCHAIN CĂN BẢN 2026",
+        NgayCap: todayStr,
+        DonViCap: defaultIssuerUnit,
+      },
+    ];
 
-    if (!certCode.trim() || !recipientName.trim() || !courseName.trim() || !issueDate || !issuerUnit.trim() || !issueFile || !issueHash) {
-      setStatusMsg({ type: "error", text: "Vui lòng nhập đầy đủ thông tin và tải file chứng chỉ!" });
+    const worksheet = XLSX.utils.json_to_sheet(sampleData);
+    worksheet["!cols"] = [
+      { wch: 18 },
+      { wch: 16 },
+      { wch: 26 },
+      { wch: 30 },
+      { wch: 14 },
+      { wch: 32 },
+    ];
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "DanhSachCapBang");
+    XLSX.writeFile(workbook, "Mau_Cap_Phat_Chung_Chi_CertChain.xlsx");
+  };
+
+  const normalizeExcelDate = (raw: any): string => {
+    if (!raw) return todayStr;
+    if (typeof raw === "number") {
+      const parsed = XLSX.SSF.parse_date_code(raw);
+      if (parsed) {
+        return `${parsed.y}-${String(parsed.m).padStart(2, "0")}-${String(parsed.d).padStart(2, "0")}`;
+      }
+    }
+    const str = String(raw).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+    const dmy = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (dmy) {
+      return `${dmy[3]}-${dmy[2].padStart(2, "0")}-${dmy[1].padStart(2, "0")}`;
+    }
+    return str || todayStr;
+  };
+
+  const handleExcelFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setStatusMsg(null);
+    setBatchFileName(file.name);
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array" });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rawRows = XLSX.utils.sheet_to_json<Record<string, any>>(firstSheet, { defval: "" });
+
+      if (rawRows.length === 0) {
+        setStatusMsg({ type: "error", text: "File Excel trống hoặc không có dòng dữ liệu nào!" });
+        setBatchRows([]);
+        return;
+      }
+
+      if (rawRows.length > 100) {
+        setStatusMsg({ type: "error", text: "Smart Contract giới hạn tối đa 100 chứng chỉ mỗi lô!" });
+        return;
+      }
+
+      const existingCodes = new Set(records.map((r) => r.certCode.trim().toUpperCase()));
+      const seenInFile = new Set<string>();
+
+      const parsedRows: BatchPreviewRow[] = rawRows.map((row, idx) => {
+        const rawCode = String(
+          row.MaChungChi ?? row.CertCode ?? row["Mã chứng chỉ"] ?? ""
+        )
+          .trim()
+          .toUpperCase();
+
+        const sCode = String(
+          row.MaSinhVien ?? row.StudentCode ?? row["MSSV"] ?? row["Mã số sinh viên"] ?? ""
+        )
+          .trim()
+          .toUpperCase();
+
+        const rName = String(
+          row.HoTen ?? row.RecipientName ?? row["Họ tên"] ?? row["Họ và tên"] ?? ""
+        ).trim();
+
+        const cName = String(
+          row.TenKhoaHoc ?? row.CourseName ?? row["Tên khóa học"] ?? row["Khóa học"] ?? ""
+        ).trim();
+
+        const iDate = normalizeExcelDate(
+          row.NgayCap ?? row.IssueDate ?? row["Ngày cấp"]
+        );
+
+        const iUnit =
+          String(
+            row.DonViCap ?? row.IssuerUnit ?? row["Đơn vị cấp"] ?? defaultIssuerUnit
+          ).trim() || defaultIssuerUnit;
+
+        const finalCode = rawCode || buildUniqueCertCode(existingCodes, records.length + idx + 1);
+        const rowSalt = generateSalt();
+        const rowHash = hashMetadataWithSalt(
+          {
+            certCode: finalCode,
+            studentCode: sCode,
+            recipientName: rName,
+            courseName: cName,
+            issueDate: iDate,
+            issuerUnit: iUnit,
+          },
+          rowSalt
+        );
+
+        let error = "";
+        if (!rName || !cName) {
+          error = "Thiếu Họ tên hoặc Tên khóa học";
+        } else if (existingCodes.has(finalCode) && rawCode) {
+          error = "Trùng mã CC đã có trên hệ thống";
+        } else if (seenInFile.has(finalCode)) {
+          error = "Trùng mã CC trong file Excel";
+        }
+
+        seenInFile.add(finalCode);
+        existingCodes.add(finalCode);
+
+        return {
+          certCode: finalCode,
+          studentCode: sCode,
+          recipientName: rName,
+          courseName: cName,
+          issueDate: iDate,
+          issuerUnit: iUnit,
+          salt: rowSalt,
+          certHash: rowHash,
+          error: error || undefined,
+        };
+      });
+
+      setBatchRows(parsedRows);
+    } catch (err: any) {
+      setStatusMsg({ type: "error", text: "Không thể đọc file Excel: " + (err?.message || "Định dạng không hợp lệ") });
+    }
+  };
+
+  const handleRemoveBatchRow = (index: number) => {
+    setBatchRows((prev) => prev.filter((_, idx) => idx !== index));
+  };
+
+  const handleBatchIssueSubmit = async () => {
+    setStatusMsg(null);
+    if (batchRows.length === 0) {
+      setStatusMsg({ type: "error", text: "Vui lòng tải lên danh sách Excel trước khi ký phát hành!" });
+      return;
+    }
+
+    const invalidRow = batchRows.find((r) => r.error);
+    if (invalidRow) {
+      setStatusMsg({
+        type: "error",
+        text: `Dữ liệu có dòng lỗi (${invalidRow.certCode}: ${invalidRow.error}). Vui lòng xóa dòng lỗi hoặc sửa file Excel!`,
+      });
       return;
     }
 
@@ -234,10 +469,122 @@ export default function AdminDashboardLayout() {
       setTxLoading(true);
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI.abi, signer);
+
+      const hashes = batchRows.map((item) => item.certHash);
+      const payloads = batchRows.map((item) =>
+        encodeOnChainPayload({
+          certCode: item.certCode,
+          recipientName: item.recipientName,
+          courseName: item.courseName,
+          issueDate: item.issueDate,
+          issuerUnit: item.issuerUnit,
+        })
+      );
+
+      // 1 giao dịch MetaMask duy nhất cho toàn bộ danh sách
+      const tx = await contract.issueBatchCertificates(hashes, payloads);
+      setStatusMsg({
+        type: "success",
+        text: `Đang chờ Sepolia xác nhận lô ${batchRows.length} chứng chỉ...`,
+        txHash: tx.hash,
+      });
+
+      await tx.wait();
+
+      // 1. Lưu bộ nhớ đệm cục bộ
+      const savedRaw = localStorage.getItem(STORAGE_KEY);
+      const localMap: Record<string, CertificateMetadata> = savedRaw ? JSON.parse(savedRaw) : {};
+      for (const item of batchRows) {
+        localMap[item.certHash] = {
+          certCode: item.certCode,
+          recipientName: item.recipientName,
+          courseName: item.courseName,
+          issueDate: item.issueDate,
+          issuerUnit: item.issuerUnit,
+          salt: item.salt,
+          certHash: item.certHash,
+          txHash: tx.hash,
+        };
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(localMap));
+
+      // 2. Gọi API Backend lưu hàng loạt vào SQL Server
+      const batchPayload = batchRows.map((item) => ({
+        certCode: item.certCode,
+        studentCode: item.studentCode,
+        recipientName: item.recipientName,
+        courseName: item.courseName,
+        issueDate: item.issueDate,
+        issuerUnit: item.issuerUnit,
+        securityKey: item.salt,
+        certHash: item.certHash,
+      }));
+
+      const apiRes = await fetch("http://localhost:4000/api/certificates/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          certificates: batchPayload,
+          txHash: tx.hash,
+        }),
+      });
+
+      const apiData = await apiRes.json();
+      if (!apiRes.ok) {
+        throw new Error(apiData.message || "Lỗi đồng bộ SQL Server hàng loạt");
+      }
+
+      setStatusMsg({
+        type: "success",
+        text: `Cấp phát hàng loạt thành công ${batchRows.length} chứng chỉ lên Blockchain & SQL Server!`,
+        txHash: tx.hash,
+      });
+
+      setBatchRows([]);
+      setBatchFileName("");
+      await syncBlockchainData();
+    } catch (err: any) {
+      const reason = err?.reason || err?.shortMessage || err?.message || "Giao dịch cấp hàng loạt thất bại.";
+      setStatusMsg({ type: "error", text: reason });
+    } finally {
+      setTxLoading(false);
+    }
+  };
+
+  // =========================================================================
+  // XỬ LÝ CẤP ĐƠN LẺ
+  // =========================================================================
+  const handleIssueSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setStatusMsg(null);
+
+    const normalizedCertCode = certCode.trim().toUpperCase();
+
+    if (!normalizedCertCode || !recipientName.trim() || !courseName.trim() || !issueDate || !issuerUnit.trim() || !issueFile || !issueHash) {
+      setStatusMsg({ type: "error", text: "Vui lòng nhập đầy đủ thông tin và tải file chứng chỉ!" });
+      return;
+    }
+
+    const isDuplicateCode = records.some(
+      (item) => item.certCode.trim().toUpperCase() === normalizedCertCode
+    );
+    if (isDuplicateCode) {
+      setStatusMsg({
+        type: "error",
+        text: `Mã chứng chỉ "${normalizedCertCode}" đã tồn tại trên hệ thống! Vui lòng đổi mã khác hoặc bấm nút "Tạo mã".`,
+      });
+      return;
+    }
+
+    try {
+      setTxLoading(true);
+      const provider = new BrowserProvider(window.ethereum);
+      const signer = await provider.getSigner();
+      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI.abi, signer);
 
       const payload = encodeOnChainPayload({
-        certCode: certCode.trim(),
+        certCode: normalizedCertCode,
         recipientName: recipientName.trim(),
         courseName: courseName.trim(),
         issueDate,
@@ -253,10 +600,9 @@ export default function AdminDashboardLayout() {
 
       await tx.wait();
 
-      const savedRaw = localStorage.getItem(STORAGE_KEY);
-      const localMap: Record<string, CertificateMetadata> = savedRaw ? JSON.parse(savedRaw) : {};
-      localMap[issueHash] = {
-        certCode: certCode.trim(),
+      const certRecord: CertificateMetadata & { studentCode?: string } = {
+        certCode: normalizedCertCode,
+        studentCode: studentCode.trim().toUpperCase(),
         recipientName: recipientName.trim(),
         courseName: courseName.trim(),
         issueDate,
@@ -265,15 +611,30 @@ export default function AdminDashboardLayout() {
         certHash: issueHash,
         txHash: tx.hash,
       };
+
+      const savedRaw = localStorage.getItem(STORAGE_KEY);
+      const localMap: Record<string, CertificateMetadata> = savedRaw ? JSON.parse(savedRaw) : {};
+      localMap[issueHash] = certRecord;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(localMap));
 
-      setStatusMsg({
-        type: "success",
-        text: `Cấp chứng chỉ ${certCode.trim()} thành công!`,
-        txHash: tx.hash,
-      });
+      try {
+        await saveCertificateToSQL(certRecord);
+        setStatusMsg({
+          type: "success",
+          text: `Cấp chứng chỉ ${normalizedCertCode} lên Blockchain và lưu SQL Server thành công!`,
+          txHash: tx.hash,
+        });
+      } catch (sqlErr: any) {
+        console.error("Lỗi đồng bộ SQL Server:", sqlErr);
+        setStatusMsg({
+          type: "success",
+          text: `Đã cấp trên Blockchain, nhưng lưu SQL Server báo lỗi: ${sqlErr.message}`,
+          txHash: tx.hash,
+        });
+      }
 
       setCertCode("");
+      setStudentCode("");
       setRecipientName("");
       setCourseName("");
       setIssueFile(null);
@@ -289,17 +650,23 @@ export default function AdminDashboardLayout() {
   };
 
   const handleRevoke = async (certHash: string, code: string) => {
-    if (!window.confirm(`Xác nhận thu hồi hiệu lực chứng chỉ "${code}" trên Blockchain?`)) return;
+    if (!window.confirm(`Xác nhận thu hồi hiệu lực chứng chỉ "${code}" trên Blockchain & SQL Server?`)) return;
     setStatusMsg(null);
     try {
       setTxLoading(true);
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
+      const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI.abi, signer);
 
       const tx = await contract.revokeCertificate(certHash);
       setStatusMsg({ type: "success", text: "Đang gửi giao dịch thu hồi lên Sepolia...", txHash: tx.hash });
       await tx.wait();
+
+      try {
+        await revokeCertificateInSQL(certHash);
+      } catch (sqlErr) {
+        console.warn("Không thể cập nhật trạng thái thu hồi trên SQL Server:", sqlErr);
+      }
 
       setStatusMsg({ type: "success", text: `Đã thu hồi chứng chỉ ${code} thành công!`, txHash: tx.hash });
       await syncBlockchainData();
@@ -319,7 +686,8 @@ export default function AdminDashboardLayout() {
         const matchSearch =
           item.certCode.toLowerCase().includes(q) ||
           item.recipientName.toLowerCase().includes(q) ||
-          item.courseName.toLowerCase().includes(q);
+          item.courseName.toLowerCase().includes(q) ||
+          (item.studentCode || "").toLowerCase().includes(q);
         if (!matchSearch) return false;
       }
 
@@ -355,7 +723,7 @@ export default function AdminDashboardLayout() {
     for (let i = 6; i >= 0; i--) {
       const d = new Date();
       d.setDate(d.getDate() - i);
-      const iso = d.toISOString().split("T")[0];
+      const iso = formatLocalDate(d);
       const label = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
       const dayItems = records.filter((r) => r.issueDate === iso);
       days.push({
@@ -391,7 +759,8 @@ export default function AdminDashboardLayout() {
       !q ||
       item.certCode.toLowerCase().includes(q) ||
       item.recipientName.toLowerCase().includes(q) ||
-      item.courseName.toLowerCase().includes(q);
+      item.courseName.toLowerCase().includes(q) ||
+      (item.studentCode || "").toLowerCase().includes(q);
     return matchesStatus && matchesQuery;
   });
 
@@ -405,7 +774,6 @@ export default function AdminDashboardLayout() {
 
   return (
     <div className="bg-luxury-grid relative flex min-h-screen bg-[#f0f7ff] text-slate-900 selection:bg-blue-600 selection:text-white">
-      {/* Hậu cảnh Animation Xanh Băng Sáng nhẹ nhàng */}
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
         <div className="animate-pulse-glow absolute -top-40 left-1/2 h-[480px] w-[920px] rounded-full bg-gradient-to-b from-sky-300/30 via-blue-400/12 to-transparent blur-[110px]" />
         <div className="animate-shooting-star absolute top-14 left-1/4 h-[2px] w-28 bg-gradient-to-r from-transparent via-blue-500 to-cyan-400 opacity-0" />
@@ -421,11 +789,12 @@ export default function AdminDashboardLayout() {
           </div>
           <div>
             <div className="text-lg font-extrabold tracking-tight text-slate-900">CERT-CHAIN</div>
-            <div className="text-xs font-semibold text-blue-600">Admin Dashboard</div>
+            <div className="text-xs font-semibold text-blue-600">
+              {currentAdmin?.FullName || "Admin Dashboard"}
+            </div>
           </div>
         </div>
 
-        {/* Linh vật Robot AI Sentinel trên Sidebar */}
         <AdminSidebarMascot mousePos={mousePos} isAuthorized={isAuthorizedAdmin} txLoading={txLoading} />
 
         <nav className="flex-1 space-y-2">
@@ -469,7 +838,7 @@ export default function AdminDashboardLayout() {
           </button>
         </nav>
 
-        <div className="border-t border-blue-100 pt-4">
+        <div className="space-y-2 border-t border-blue-100 pt-4">
           <Link
             to="/"
             className="flex items-center justify-between rounded-2xl border border-blue-200 bg-blue-50/80 px-4 py-3 text-xs font-bold text-blue-700 transition hover:bg-blue-100"
@@ -477,18 +846,26 @@ export default function AdminDashboardLayout() {
             <span>Trang xác minh công khai</span>
             <ArrowUpRight className="h-4 w-4" />
           </Link>
+
+          <button
+            type="button"
+            onClick={handleAdminLogout}
+            className="flex w-full items-center justify-between rounded-2xl border border-rose-200 bg-rose-50/80 px-4 py-2.5 text-xs font-bold text-rose-700 transition hover:bg-rose-100"
+          >
+            <span>Đăng xuất tài khoản</span>
+            <LogOut className="h-4 w-4" />
+          </button>
         </div>
       </aside>
 
       {/* Khu vực Nội dung Chính */}
       <main className="relative z-10 flex-1 px-6 py-6 lg:px-9">
         <div className="mx-auto max-w-6xl">
-          {/* Top Header Bar */}
           <header className="mb-7 flex flex-wrap items-center justify-between gap-4">
             <div className="flex w-full max-w-xs items-center gap-2.5 rounded-2xl border border-blue-200/80 bg-white/90 px-4 py-2.5 shadow-sm backdrop-blur-xl focus-within:border-blue-500">
               <input
                 type="text"
-                placeholder="Tìm nhanh mã chứng chỉ, học viên..."
+                placeholder="Tìm mã CC, MSSV, học viên..."
                 value={topSearch}
                 onChange={(e) => setTopSearch(e.target.value)}
                 className="w-full bg-transparent text-sm font-medium text-slate-900 placeholder-slate-400 outline-none"
@@ -640,7 +1017,7 @@ export default function AdminDashboardLayout() {
                       <button
                         type="button"
                         onClick={syncBlockchainData}
-                        title="Đồng bộ dữ liệu từ Blockchain"
+                        title="Đồng bộ dữ liệu từ SQL Server & Blockchain"
                         className="flex h-9 w-9 items-center justify-center rounded-2xl border border-blue-200/80 bg-white/90 text-slate-700 shadow-sm transition hover:text-blue-600"
                       >
                         <RefreshCw className={`h-4 w-4 ${loadingData ? "animate-spin text-blue-600" : ""}`} />
@@ -648,7 +1025,6 @@ export default function AdminDashboardLayout() {
                     </div>
                   </div>
 
-                  {/* HÀNG 1: 4 THẺ KPI + BIỂU ĐỒ */}
                   <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-12">
                     <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:col-span-6">
                       <div className="flex items-center gap-5 rounded-3xl border border-blue-200/80 bg-white/90 p-6 shadow-sm backdrop-blur-xl transition hover:-translate-y-0.5 hover:border-blue-400">
@@ -692,7 +1068,6 @@ export default function AdminDashboardLayout() {
                       </div>
                     </div>
 
-                    {/* Biểu đồ 7 ngày */}
                     <div className="flex flex-col justify-between rounded-3xl border border-blue-200/80 bg-white/90 p-6 shadow-sm backdrop-blur-xl lg:col-span-6">
                       <div className="mb-4 flex items-center justify-between">
                         <div>
@@ -784,7 +1159,6 @@ export default function AdminDashboardLayout() {
                     </div>
                   </div>
 
-                  {/* HÀNG 2: 2 BẢNG DỮ LIỆU RÕ NÉT */}
                   <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
                     <div className="flex flex-col justify-between rounded-3xl border border-blue-200/80 bg-white/90 p-6 shadow-sm backdrop-blur-xl lg:col-span-5">
                       <div>
@@ -918,7 +1292,7 @@ export default function AdminDashboardLayout() {
                         <Search className="h-4 w-4 text-blue-600" />
                         <input
                           type="text"
-                          placeholder="Tìm theo mã chứng chỉ, họ tên hoặc tên khóa học..."
+                          placeholder="Tìm theo mã chứng chỉ, MSSV, họ tên hoặc tên khóa học..."
                           value={searchQuery}
                           onChange={(e) => setSearchQuery(e.target.value)}
                           className="w-full bg-transparent text-sm font-medium text-slate-900 outline-none"
@@ -941,6 +1315,7 @@ export default function AdminDashboardLayout() {
                         <thead>
                           <tr className="border-b border-slate-200 text-xs font-extrabold text-slate-500 uppercase">
                             <th className="pb-3.5">Mã chứng chỉ</th>
+                            <th className="pb-3.5">MSSV</th>
                             <th className="pb-3.5">Họ và tên</th>
                             <th className="pb-3.5">Khóa học</th>
                             <th className="pb-3.5">Ngày cấp</th>
@@ -952,6 +1327,9 @@ export default function AdminDashboardLayout() {
                           {filteredManageRecords.map((item) => (
                             <tr key={item.certHash} className="hover:bg-blue-50/60">
                               <td className="py-3.5 font-mono font-extrabold text-blue-700">{item.certCode}</td>
+                              <td className="py-3.5 font-mono text-xs font-bold text-slate-600">
+                                {item.studentCode || "—"}
+                              </td>
                               <td className="py-3.5 font-bold text-slate-900">{item.recipientName}</td>
                               <td className="py-3.5 font-medium text-slate-700">{item.courseName}</td>
                               <td className="py-3.5 font-medium text-slate-600">{item.issueDate}</td>
@@ -996,132 +1374,328 @@ export default function AdminDashboardLayout() {
               )}
 
               {/* ===================================================================== */}
-              {/* TRANG 3: CẤP CHỨNG CHỈ MỚI                                            */}
+              {/* TRANG 3: CẤP CHỨNG CHỈ MỚI (ĐƠN LẺ & HÀNG LOẠT EXCEL)                 */}
               {/* ===================================================================== */}
               {activeTab === "issue" && (
                 <div>
-                  <div className="mb-6">
-                    <h1 className="text-2xl font-black text-slate-900">Cấp Phát Chứng Chỉ Mới</h1>
-                    <p className="text-xs font-medium text-slate-600">Băm dữ liệu văn bằng và ký phát hành lên Ethereum Sepolia</p>
+                  <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <h1 className="text-2xl font-black text-slate-900">Cấp Phát Chứng Chỉ Mới</h1>
+                      <p className="text-xs font-medium text-slate-600">
+                        Băm dữ liệu văn bằng, ký phát hành lên Ethereum Sepolia và lưu vào SQL Server
+                      </p>
+                    </div>
+
+                    {/* Bộ chuyển đổi chế độ Đơn lẻ / Hàng loạt */}
+                    <div className="flex rounded-2xl border border-blue-200/80 bg-white/95 p-1 shadow-sm">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIssueMode("single");
+                          setStatusMsg(null);
+                        }}
+                        className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-extrabold transition ${
+                          issueMode === "single"
+                            ? "bg-blue-600 text-white shadow-sm"
+                            : "text-slate-700 hover:bg-blue-50"
+                        }`}
+                      >
+                        <FilePlus2 className="h-4 w-4" />
+                        Cấp đơn lẻ (Kèm tệp gốc)
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIssueMode("batch");
+                          setStatusMsg(null);
+                        }}
+                        className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-extrabold transition ${
+                          issueMode === "batch"
+                            ? "bg-blue-600 text-white shadow-sm"
+                            : "text-slate-700 hover:bg-blue-50"
+                        }`}
+                      >
+                        <FileSpreadsheet className="h-4 w-4" />
+                        Cấp hàng loạt (Import Excel)
+                      </button>
+                    </div>
                   </div>
 
-                  <form
-                    onSubmit={handleIssueSubmit}
-                    className="max-w-3xl space-y-5 rounded-3xl border border-blue-200/80 bg-white/95 p-8 shadow-lg backdrop-blur-xl"
-                  >
-                    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                      <div>
-                        <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Mã chứng chỉ *</label>
-                        <input
-                          type="text"
-                          placeholder="VD: CERT-2026-001"
-                          value={certCode}
-                          onChange={(e) => setCertCode(e.target.value)}
-                          className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 font-mono text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
-                        />
-                      </div>
+                  {issueMode === "single" ? (
+                    <form
+                      onSubmit={handleIssueSubmit}
+                      className="max-w-3xl space-y-5 rounded-3xl border border-blue-200/80 bg-white/95 p-8 shadow-lg backdrop-blur-xl"
+                    >
+                      <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
+                        <div>
+                          <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Mã chứng chỉ *</label>
+                          <div className="flex gap-1.5">
+                            <input
+                              type="text"
+                              placeholder="VD: CERT-2026-001"
+                              value={certCode}
+                              onChange={(e) => setCertCode(e.target.value.toUpperCase())}
+                              className="min-w-0 flex-1 rounded-2xl border border-slate-300 bg-slate-50 px-3.5 py-3 font-mono text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
+                            />
+                            <button
+                              type="button"
+                              onClick={handleGenerateCertCode}
+                              title="Tự động tạo mã chứng chỉ duy nhất"
+                              className="inline-flex shrink-0 items-center gap-1 rounded-2xl border border-blue-200 bg-blue-50 px-3 py-3 text-xs font-bold text-blue-700 transition hover:bg-blue-100"
+                            >
+                              <Wand2 className="h-3.5 w-3.5" />
+                              <span>Tạo mã</span>
+                            </button>
+                          </div>
+                        </div>
 
-                      <div>
-                        <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Họ tên người nhận *</label>
-                        <input
-                          type="text"
-                          placeholder="VD: Nguyễn Văn An"
-                          value={recipientName}
-                          onChange={(e) => setRecipientName(e.target.value)}
-                          className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-                      <div>
-                        <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Tên khóa học *</label>
-                        <input
-                          type="text"
-                          placeholder="VD: Công nghệ Blockchain & Web3"
-                          value={courseName}
-                          onChange={(e) => setCourseName(e.target.value)}
-                          className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Ngày cấp *</label>
-                        <input
-                          type="date"
-                          value={issueDate}
-                          onChange={(e) => setIssueDate(e.target.value)}
-                          className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Đơn vị cấp *</label>
-                      <input
-                        type="text"
-                        placeholder="VD: Trường Đại học..."
-                        value={issuerUnit}
-                        onChange={(e) => setIssuerUnit(e.target.value)}
-                        className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Tệp chứng chỉ gốc (PDF / Ảnh) *</label>
-                      <div className="relative flex cursor-pointer items-center justify-center gap-2.5 rounded-2xl border-2 border-dashed border-blue-300 bg-blue-50/60 p-6 text-sm font-bold text-blue-700 hover:bg-blue-100/70">
-                        <Upload className="h-5 w-5" />
-                        <span>{issueFile ? issueFile.name : "Bấm để chọn file chứng chỉ tạo mã Hash"}</span>
-                        <input
-                          type="file"
-                          onChange={handleFileChange}
-                          className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                        />
-                      </div>
-                    </div>
-
-                    {salt && (
-                      <div>
-                        <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Mã xác thực đi kèm (Security Key)</label>
-                        <div className="flex gap-2">
+                        <div>
+                          <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Mã số sinh viên</label>
                           <input
                             type="text"
-                            readOnly
-                            value={salt}
-                            className="w-full rounded-2xl border border-slate-300 bg-slate-100 px-4 py-2.5 font-mono text-xs font-bold text-slate-900"
+                            placeholder="VD: SV2026001"
+                            value={studentCode}
+                            onChange={(e) => setStudentCode(e.target.value)}
+                            className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 font-mono text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
                           />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              navigator.clipboard.writeText(salt);
-                              setCopiedKey(true);
-                              setTimeout(() => setCopiedKey(false), 2000);
-                            }}
-                            className="rounded-2xl border border-slate-300 bg-slate-100 px-4 hover:bg-slate-200"
-                          >
-                            {copiedKey ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4 text-slate-700" />}
-                          </button>
+                        </div>
+
+                        <div>
+                          <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Họ tên người nhận *</label>
+                          <input
+                            type="text"
+                            placeholder="VD: Nguyễn Văn An"
+                            value={recipientName}
+                            onChange={(e) => setRecipientName(e.target.value)}
+                            className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
+                          />
                         </div>
                       </div>
-                    )}
 
-                    {issueHash && (
-                      <div>
-                        <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Mã Hash (Keccak-256)</label>
-                        <code className="block break-all rounded-2xl border border-slate-300 bg-slate-100 p-3.5 font-mono text-xs font-semibold text-slate-900">
-                          {issueHash}
-                        </code>
+                      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                        <div>
+                          <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Tên khóa học *</label>
+                          <input
+                            type="text"
+                            placeholder="VD: Công nghệ Blockchain & Web3"
+                            value={courseName}
+                            onChange={(e) => setCourseName(e.target.value)}
+                            className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Ngày cấp *</label>
+                          <input
+                            type="date"
+                            value={issueDate}
+                            onChange={(e) => setIssueDate(e.target.value)}
+                            className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
+                          />
+                        </div>
                       </div>
-                    )}
 
-                    <button
-                      type="submit"
-                      disabled={txLoading}
-                      className="w-full rounded-2xl bg-gradient-to-r from-blue-600 to-sky-500 px-6 py-3.5 text-base font-extrabold text-white shadow-lg shadow-blue-500/25 transition hover:opacity-95 disabled:opacity-60"
-                    >
-                      {txLoading ? "Đang chờ xác nhận từ MetaMask..." : "Tạo & Xác nhận cấp chứng chỉ bằng MetaMask"}
-                    </button>
-                  </form>
+                      <div>
+                        <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Đơn vị cấp *</label>
+                        <input
+                          type="text"
+                          placeholder="VD: Trường Đại học..."
+                          value={issuerUnit}
+                          onChange={(e) => setIssuerUnit(e.target.value)}
+                          className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Tệp chứng chỉ gốc (PDF / Ảnh) *</label>
+                        <div className="relative flex cursor-pointer items-center justify-center gap-2.5 rounded-2xl border-2 border-dashed border-blue-300 bg-blue-50/60 p-6 text-sm font-bold text-blue-700 hover:bg-blue-100/70">
+                          <Upload className="h-5 w-5" />
+                          <span>{issueFile ? issueFile.name : "Bấm để chọn file chứng chỉ tạo mã Hash"}</span>
+                          <input
+                            type="file"
+                            onChange={handleFileChange}
+                            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                          />
+                        </div>
+                      </div>
+
+                      {salt && (
+                        <div>
+                          <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Mã xác thực đi kèm (Security Key)</label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              readOnly
+                              value={salt}
+                              className="w-full rounded-2xl border border-slate-300 bg-slate-100 px-4 py-2.5 font-mono text-xs font-bold text-slate-900"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(salt);
+                                setCopiedKey(true);
+                                setTimeout(() => setCopiedKey(false), 2000);
+                              }}
+                              className="rounded-2xl border border-slate-300 bg-slate-100 px-4 hover:bg-slate-200"
+                            >
+                              {copiedKey ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4 text-slate-700" />}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {issueHash && (
+                        <div>
+                          <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">Mã Hash (Keccak-256)</label>
+                          <code className="block break-all rounded-2xl border border-slate-300 bg-slate-100 p-3.5 font-mono text-xs font-semibold text-slate-900">
+                            {issueHash}
+                          </code>
+                        </div>
+                      )}
+
+                      <button
+                        type="submit"
+                        disabled={txLoading}
+                        className="w-full rounded-2xl bg-gradient-to-r from-blue-600 to-sky-500 px-6 py-3.5 text-base font-extrabold text-white shadow-lg shadow-blue-500/25 transition hover:opacity-95 disabled:opacity-60"
+                      >
+                        {txLoading ? "Đang chờ xác nhận từ MetaMask..." : "Tạo & Xác nhận cấp chứng chỉ bằng MetaMask"}
+                      </button>
+                    </form>
+                  ) : (
+                    /* =============================================================== */
+                    /* GIAO DIỆN CẤP PHÁT HÀNG LOẠT TỪ EXCEL                           */
+                    /* =============================================================== */
+                    <div className="space-y-6 rounded-3xl border border-blue-200/80 bg-white/95 p-8 shadow-lg backdrop-blur-xl">
+                      <div className="flex flex-wrap items-end justify-between gap-4 border-b border-slate-200 pb-6">
+                        <div className="flex-1 min-w-[260px]">
+                          <label className="mb-1.5 block text-xs font-extrabold text-slate-700 uppercase">
+                            Đơn vị cấp mặc định (nếu cột DonViCap trong Excel để trống)
+                          </label>
+                          <input
+                            type="text"
+                            value={defaultIssuerUnit}
+                            onChange={(e) => setDefaultIssuerUnit(e.target.value)}
+                            className="w-full rounded-2xl border border-slate-300 bg-slate-50 px-4 py-2.5 text-sm font-semibold text-slate-900 focus:border-blue-600 focus:bg-white focus:outline-none"
+                          />
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleDownloadExcelTemplate}
+                          className="inline-flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-extrabold text-emerald-700 transition hover:bg-emerald-100"
+                        >
+                          <Download className="h-4 w-4" />
+                          Tải file Excel mẫu (.xlsx)
+                        </button>
+                      </div>
+
+                      <div>
+                        <label className="mb-2 block text-xs font-extrabold text-slate-700 uppercase">
+                          Tải lên danh sách sinh viên (.xlsx, .xls, .csv) — Tối đa 100 dòng / lô
+                        </label>
+                        <div className="relative flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed border-blue-300 bg-blue-50/60 p-8 text-center transition hover:bg-blue-100/70">
+                          <FileSpreadsheet className="h-8 w-8 text-blue-600" />
+                          <div className="text-sm font-extrabold text-blue-800">
+                            {batchFileName ? `Đã chọn: ${batchFileName}` : "Bấm để chọn file Excel danh sách cấp chứng chỉ"}
+                          </div>
+                          <div className="text-xs font-medium text-slate-500">
+                            Hệ thống tự động sinh mã chứng chỉ (nếu để trống), tạo Security Key và băm Keccak-256 cho từng dòng
+                          </div>
+                          <input
+                            type="file"
+                            accept=".xlsx,.xls,.csv"
+                            onChange={handleExcelFileUpload}
+                            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                          />
+                        </div>
+                      </div>
+
+                      {batchRows.length > 0 && (
+                        <div>
+                          <div className="mb-3 flex items-center justify-between">
+                            <h3 className="text-sm font-extrabold text-slate-900">
+                              Xem trước dữ liệu ({batchRows.length} chứng chỉ)
+                            </h3>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setBatchRows([]);
+                                setBatchFileName("");
+                              }}
+                              className="text-xs font-bold text-rose-600 hover:underline"
+                            >
+                              Xóa danh sách
+                            </button>
+                          </div>
+
+                          <div className="max-h-96 overflow-auto rounded-2xl border border-slate-200">
+                            <table className="w-full text-left text-xs">
+                              <thead className="sticky top-0 bg-slate-100 font-extrabold text-slate-600 uppercase">
+                                <tr>
+                                  <th className="p-3">#</th>
+                                  <th className="p-3">Mã CC</th>
+                                  <th className="p-3">MSSV</th>
+                                  <th className="p-3">Họ tên</th>
+                                  <th className="p-3">Khóa học</th>
+                                  <th className="p-3">Ngày cấp</th>
+                                  <th className="p-3">Mã Hash (Keccak-256)</th>
+                                  <th className="p-3">Trạng thái</th>
+                                  <th className="p-3 text-right">Xóa</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-100">
+                                {batchRows.map((row, idx) => (
+                                  <tr key={idx} className={row.error ? "bg-rose-50/80" : "hover:bg-blue-50/50"}>
+                                    <td className="p-3 font-bold text-slate-500">{idx + 1}</td>
+                                    <td className="p-3 font-mono font-extrabold text-blue-700">{row.certCode}</td>
+                                    <td className="p-3 font-mono font-semibold text-slate-700">{row.studentCode || "—"}</td>
+                                    <td className="p-3 font-bold text-slate-900">{row.recipientName || "—"}</td>
+                                    <td className="p-3 font-medium text-slate-700">{row.courseName || "—"}</td>
+                                    <td className="p-3 font-medium text-slate-600">{row.issueDate}</td>
+                                    <td className="p-3 font-mono text-[11px] text-slate-500">
+                                      {row.certHash.slice(0, 10)}...{row.certHash.slice(-6)}
+                                    </td>
+                                    <td className="p-3">
+                                      {row.error ? (
+                                        <span className="inline-block rounded-lg bg-rose-100 px-2 py-0.5 font-bold text-rose-700">
+                                          {row.error}
+                                        </span>
+                                      ) : (
+                                        <span className="inline-block rounded-lg bg-emerald-100 px-2 py-0.5 font-bold text-emerald-700">
+                                          Hợp lệ
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="p-3 text-right">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRemoveBatchRow(idx)}
+                                        className="rounded-lg p-1 text-slate-400 hover:bg-rose-100 hover:text-rose-600"
+                                      >
+                                        <Trash2 className="h-4 w-4" />
+                                      </button>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={handleBatchIssueSubmit}
+                            disabled={txLoading}
+                            className="mt-5 w-full rounded-2xl bg-gradient-to-r from-blue-600 to-sky-500 px-6 py-3.5 text-base font-extrabold text-white shadow-lg shadow-blue-500/25 transition hover:opacity-95 disabled:opacity-60"
+                          >
+                            {txLoading
+                              ? "Đang chờ xác nhận lô giao dịch từ MetaMask..."
+                              : `Ký phát hành hàng loạt ${batchRows.length} chứng chỉ (1 giao dịch MetaMask)`}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </>

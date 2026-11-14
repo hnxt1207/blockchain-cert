@@ -6,22 +6,36 @@ import type { TypedContractEvent, TypedDeferredTopicFilter, TypedEventLog, Typed
   
 
   export interface CertificateRegistryInterface extends Interface {
-    getFunction(nameOrSignature: "admin" | "issueCertificate" | "revokeCertificate" | "verifyCertificate"): FunctionFragment;
+    getFunction(nameOrSignature: "admin" | "issueBatchCertificates" | "issueCertificate" | "revokeCertificate" | "verifyCertificate"): FunctionFragment;
 
-    getEvent(nameOrSignatureOrTopic: "CertificateIssued" | "CertificateRevoked"): EventFragment;
+    getEvent(nameOrSignatureOrTopic: "BatchCertificatesIssued" | "CertificateIssued" | "CertificateRevoked"): EventFragment;
 
     encodeFunctionData(functionFragment: 'admin', values?: undefined): string;
+encodeFunctionData(functionFragment: 'issueBatchCertificates', values: [BytesLike[], string[]]): string;
 encodeFunctionData(functionFragment: 'issueCertificate', values: [BytesLike, string]): string;
 encodeFunctionData(functionFragment: 'revokeCertificate', values: [BytesLike]): string;
 encodeFunctionData(functionFragment: 'verifyCertificate', values: [BytesLike]): string;
 
     decodeFunctionResult(functionFragment: 'admin', data: BytesLike): Result;
+decodeFunctionResult(functionFragment: 'issueBatchCertificates', data: BytesLike): Result;
 decodeFunctionResult(functionFragment: 'issueCertificate', data: BytesLike): Result;
 decodeFunctionResult(functionFragment: 'revokeCertificate', data: BytesLike): Result;
 decodeFunctionResult(functionFragment: 'verifyCertificate', data: BytesLike): Result;
   }
 
   
+    export namespace BatchCertificatesIssuedEvent {
+      export type InputTuple = [count: BigNumberish, issuedAt: BigNumberish];
+      export type OutputTuple = [count: bigint, issuedAt: bigint];
+      export interface OutputObject {count: bigint, issuedAt: bigint }
+      export type Event = TypedContractEvent<InputTuple, OutputTuple, OutputObject>
+      export type Filter = TypedDeferredTopicFilter<Event>
+      export type Log = TypedEventLog<Event>
+      export type LogDescription = TypedLogDescription<Event>
+    }
+
+  
+
     export namespace CertificateIssuedEvent {
       export type InputTuple = [certHash: BytesLike, studentId: string, issuedAt: BigNumberish];
       export type OutputTuple = [certHash: string, studentId: string, issuedAt: bigint];
@@ -88,6 +102,14 @@ decodeFunctionResult(functionFragment: 'verifyCertificate', data: BytesLike): Re
     
 
     
+    issueBatchCertificates: TypedContractMethod<
+      [_certHashes: BytesLike[], _studentIds: string[], ],
+      [void],
+      'nonpayable'
+    >
+    
+
+    
     issueCertificate: TypedContractMethod<
       [_certHash: BytesLike, _studentId: string, ],
       [void],
@@ -119,6 +141,11 @@ decodeFunctionResult(functionFragment: 'verifyCertificate', data: BytesLike): Re
       [string],
       'view'
     >;
+getFunction(nameOrSignature: 'issueBatchCertificates'): TypedContractMethod<
+      [_certHashes: BytesLike[], _studentIds: string[], ],
+      [void],
+      'nonpayable'
+    >;
 getFunction(nameOrSignature: 'issueCertificate'): TypedContractMethod<
       [_certHash: BytesLike, _studentId: string, ],
       [void],
@@ -135,11 +162,16 @@ getFunction(nameOrSignature: 'verifyCertificate'): TypedContractMethod<
       'view'
     >;
 
-    getEvent(key: 'CertificateIssued'): TypedContractEvent<CertificateIssuedEvent.InputTuple, CertificateIssuedEvent.OutputTuple, CertificateIssuedEvent.OutputObject>;
+    getEvent(key: 'BatchCertificatesIssued'): TypedContractEvent<BatchCertificatesIssuedEvent.InputTuple, BatchCertificatesIssuedEvent.OutputTuple, BatchCertificatesIssuedEvent.OutputObject>;
+getEvent(key: 'CertificateIssued'): TypedContractEvent<CertificateIssuedEvent.InputTuple, CertificateIssuedEvent.OutputTuple, CertificateIssuedEvent.OutputObject>;
 getEvent(key: 'CertificateRevoked'): TypedContractEvent<CertificateRevokedEvent.InputTuple, CertificateRevokedEvent.OutputTuple, CertificateRevokedEvent.OutputObject>;
 
     filters: {
       
+      'BatchCertificatesIssued(uint256,uint256)': TypedContractEvent<BatchCertificatesIssuedEvent.InputTuple, BatchCertificatesIssuedEvent.OutputTuple, BatchCertificatesIssuedEvent.OutputObject>;
+      BatchCertificatesIssued: TypedContractEvent<BatchCertificatesIssuedEvent.InputTuple, BatchCertificatesIssuedEvent.OutputTuple, BatchCertificatesIssuedEvent.OutputObject>;
+    
+
       'CertificateIssued(bytes32,string,uint256)': TypedContractEvent<CertificateIssuedEvent.InputTuple, CertificateIssuedEvent.OutputTuple, CertificateIssuedEvent.OutputObject>;
       CertificateIssued: TypedContractEvent<CertificateIssuedEvent.InputTuple, CertificateIssuedEvent.OutputTuple, CertificateIssuedEvent.OutputObject>;
     

@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from "react";
-import { Link } from "react-router-dom";
+﻿import React, { useState, useEffect, useRef } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { JsonRpcProvider, Contract } from "ethers";
 import {
   ShieldCheck,
@@ -19,14 +19,22 @@ import {
   Layers,
   QrCode,
   ArrowDown,
+  LogIn,
+  UserCheck,
+  LogOut,
 } from "lucide-react";
-import { CONTRACT_ADDRESS, CONTRACT_ABI, SEPOLIA_RPC_URL } from "../shared/contractConfig";
+import { CONTRACT_ADDRESS, CONTRACT_ABI, SEPOLIA_RPC_URL } from "../ket-noi-blockchain/cau-hinh-hop-dong/contractConfig";
 import {
   type CertificateMetadata,
   hashCertificateWithSalt,
   decodeOnChainPayload,
-} from "../shared/hashHelper";
-import { STORAGE_KEY, fetchAllCertificates } from "../shared/certService";
+} from "../ket-noi-blockchain/ma-hoa-keccak256/hashHelper";
+import {
+  STORAGE_KEY,
+  fetchAllCertificates,
+  getCurrentUser,
+  logoutUser,
+} from "../ket-noi-du-lieu/apiService";
 
 interface VerifyResult {
   exists: boolean;
@@ -41,13 +49,6 @@ interface VerifyResult {
   txHash?: string;
 }
 
-/**
- * Linh vật Robot BIN 3D:
- * - Thân trốn phía sau mép trên của khung xác minh (z-10)
- * - 2 tay robot đặt đè lên viền khung (z-30)
- * - Đôi mắt đảo nhìn theo trỏ chuột, tự động chớp mắt sinh động
- * - Khi người dùng nhập Mã xác thực (isPeeking = true): BIN đưa tay lên che nhưng vẫn nheo 1 mắt lén nhìn!
- */
 function BinRobotMascot({
   mousePos,
   isLoading,
@@ -64,7 +65,6 @@ function BinRobotMascot({
   const [headTilt, setHeadTilt] = useState({ rotateX: 0, rotateY: 0, rotateZ: 0 });
   const [isBlinking, setIsBlinking] = useState(false);
 
-  // Hiệu ứng chớp mắt tự nhiên ngẫu nhiên mỗi 3.5 giây
   useEffect(() => {
     const interval = setInterval(() => {
       setIsBlinking(true);
@@ -73,7 +73,6 @@ function BinRobotMascot({
     return () => clearInterval(interval);
   }, []);
 
-  // Tính góc đảo mắt & nghiêng đầu theo trỏ chuột
   useEffect(() => {
     if (!headRef.current) return;
     const rect = headRef.current.getBoundingClientRect();
@@ -81,7 +80,6 @@ function BinRobotMascot({
     const botCenterY = rect.top + rect.height / 2;
 
     if (isPeeking) {
-      // Khi lén nhìn: mắt liếc hẳn xuống dưới về phía ô nhập mã
       setEyeOffset({ x: 2.5, y: 5.5 });
       setHeadTilt({ rotateX: -12, rotateY: 8, rotateZ: -6 });
       return;
@@ -126,7 +124,6 @@ function BinRobotMascot({
 
   return (
     <div className="pointer-events-none relative mx-auto -mb-7 flex w-full max-w-[340px] flex-col items-center select-none">
-      {/* Bong bóng thoại sinh động của BIN */}
       <div
         className={`mb-2 rounded-full border px-3.5 py-1 text-[11px] font-extrabold tracking-wide shadow-md transition-all duration-300 ${
           isPeeking
@@ -141,16 +138,11 @@ function BinRobotMascot({
         {statusBubble}
       </div>
 
-      {/* ===================================================================== */}
-      {/* LỚP 1 (z-10): ĐẦU & THÂN ROBOT BIN TRỐN PHÍA SAU MÉP KHUNG XÁC MINH   */}
-      {/* ===================================================================== */}
       <div
         ref={headRef}
         className="relative z-10 transition-transform duration-300 ease-out"
         style={{
-          transform: isPeeking
-            ? "translateY(10px)"
-            : "translateY(0px)",
+          transform: isPeeking ? "translateY(10px)" : "translateY(0px)",
         }}
       >
         <div
@@ -166,24 +158,20 @@ function BinRobotMascot({
             className="drop-shadow-[0_14px_24px_rgba(37,99,235,0.28)]"
           >
             <defs>
-              {/* Chất liệu vỏ kim loại trắng ngọc trai 3D */}
               <linearGradient id="binShellWhite" x1="0%" y1="0%" x2="100%" y2="100%">
                 <stop offset="0%" stopColor="#ffffff" />
                 <stop offset="65%" stopColor="#e2e8f0" />
                 <stop offset="100%" stopColor="#94a3b8" />
               </linearGradient>
-              {/* Chất liệu viền xanh Sapphire kim loại */}
               <linearGradient id="binBlueAccent" x1="0%" y1="0%" x2="100%" y2="100%">
                 <stop offset="0%" stopColor="#38bdf8" />
                 <stop offset="50%" stopColor="#2563eb" />
                 <stop offset="100%" stopColor="#1e3a8a" />
               </linearGradient>
-              {/* Mặt kính màn hình OLED đen sâu */}
               <linearGradient id="binVisorGlass" x1="0%" y1="0%" x2="0%" y2="100%">
                 <stop offset="0%" stopColor="#020617" />
                 <stop offset="100%" stopColor="#0f172a" />
               </linearGradient>
-              {/* Hiệu ứng phát sáng neon cho mắt */}
               <filter id="binEyeGlow" x="-30%" y="-30%" width="160%" height="160%">
                 <feGaussianBlur stdDeviation="2.5" result="blur" />
                 <feMerge>
@@ -193,7 +181,6 @@ function BinRobotMascot({
               </filter>
             </defs>
 
-            {/* Ăng-ten đôi phát tín hiệu */}
             <line x1="66" y1="26" x2="58" y2="10" stroke="#2563eb" strokeWidth="4" strokeLinecap="round" />
             <circle cx="58" cy="9" r="5" fill={eyeColor}>
               <animate attributeName="r" values="4;6.5;4" dur="1.8s" repeatCount="indefinite" />
@@ -204,11 +191,9 @@ function BinRobotMascot({
               <animate attributeName="r" values="6.5;4;6.5" dur="1.8s" repeatCount="indefinite" />
             </circle>
 
-            {/* Hai tai chụp âm thanh 3D hai bên */}
             <rect x="18" y="54" width="14" height="36" rx="7" fill="url(#binBlueAccent)" />
             <rect x="148" y="54" width="14" height="36" rx="7" fill="url(#binBlueAccent)" />
 
-            {/* Phần vai & cổ lấp ló phía dưới đầu */}
             <path d="M52,112 C52,102 128,102 128,112 L136,145 L44,145 Z" fill="url(#binBlueAccent)" />
             <rect x="74" y="118" width="32" height="12" rx="6" fill="#0f172a" />
             <text
@@ -223,7 +208,6 @@ function BinRobotMascot({
               BIN
             </text>
 
-            {/* Đầu Robot tròn trịa 3D */}
             <rect
               x="30"
               y="24"
@@ -235,10 +219,8 @@ function BinRobotMascot({
               strokeWidth="2"
             />
 
-            {/* Dải trang trí xanh trên đỉnh trán */}
             <path d="M68,24 L112,24 L106,31 L74,31 Z" fill="url(#binBlueAccent)" />
 
-            {/* Màn hình mặt kính Visor */}
             <rect
               x="40"
               y="36"
@@ -250,7 +232,6 @@ function BinRobotMascot({
               strokeWidth="2.5"
             />
 
-            {/* Vệt phản chiếu ánh sáng trên mặt kính */}
             <path
               d="M52,43 Q90,39 128,43"
               stroke="rgba(255,255,255,0.22)"
@@ -259,7 +240,6 @@ function BinRobotMascot({
               fill="none"
             />
 
-            {/* Hai má hồng công nghệ khi vui hoặc lén nhìn */}
             {(isPeeking || verifyStatus === "valid") && (
               <>
                 <ellipse cx="53" cy="79" rx="6" ry="3.5" fill="#fb7185" opacity="0.55" />
@@ -267,9 +247,6 @@ function BinRobotMascot({
               </>
             )}
 
-            {/* =============================================================== */}
-            {/* BIỂU CẢM ĐÔI MẮT CỦA BIN                                        */}
-            {/* =============================================================== */}
             <g
               filter="url(#binEyeGlow)"
               style={{
@@ -279,7 +256,6 @@ function BinRobotMascot({
             >
               {isPeeking ? (
                 <>
-                  {/* MẮT TRÁI: Nhắm tịt vờ như không nhìn (đường cong > ) */}
                   <path
                     d="M58,64 L73,68 L58,72"
                     fill="none"
@@ -288,21 +264,16 @@ function BinRobotMascot({
                     strokeLinecap="round"
                     strokeLinejoin="round"
                   />
-
-                  {/* MẮT PHẢI: Nheo nhỏ lại để lén liếc nhìn xuống ô nhập mã! */}
                   <rect x="101" y="64" width="22" height="8" rx="4" fill={eyeColor} />
-                  {/* Con ngươi lén liếc xuống */}
                   <circle cx="113" cy="69" r="3" fill="#ffffff" />
                 </>
               ) : isBlinking ? (
                 <>
-                  {/* Chớp mắt tự nhiên */}
                   <line x1="57" y1="67" x2="77" y2="67" stroke={eyeColor} strokeWidth="4" strokeLinecap="round" />
                   <line x1="103" y1="67" x2="123" y2="67" stroke={eyeColor} strokeWidth="4" strokeLinecap="round" />
                 </>
               ) : verifyStatus === "valid" ? (
                 <>
-                  {/* Mắt cười híp hình vòng cung ^ ^ */}
                   <path
                     d="M57,70 Q67,56 77,70"
                     fill="none"
@@ -320,10 +291,8 @@ function BinRobotMascot({
                 </>
               ) : (
                 <>
-                  {/* Đôi mắt tròn to sinh động đảo theo trỏ chuột */}
                   <circle cx="67" cy="67" r="10.5" fill={eyeColor} />
                   <circle cx="113" cy="67" r="10.5" fill={eyeColor} />
-                  {/* Điểm sáng long lanh trong mắt */}
                   <circle cx="70.5" cy="63.5" r="3.4" fill="#ffffff" />
                   <circle cx="116.5" cy="63.5" r="3.4" fill="#ffffff" />
                   <circle cx="63.5" cy="70.5" r="1.5" fill="#ffffff" opacity="0.8" />
@@ -332,9 +301,7 @@ function BinRobotMascot({
               )}
             </g>
 
-            {/* Miệng biểu cảm nhỏ xinh */}
             {isPeeking ? (
-              /* Miệng cười tinh nghịch hình chữ w nhỏ */
               <path
                 d="M83,84 Q86.5,88 90,84 Q93.5,88 97,84"
                 fill="none"
@@ -363,14 +330,7 @@ function BinRobotMascot({
         </div>
       </div>
 
-      {/* ===================================================================== */}
-      {/* LỚP 2 (z-30): HAI BÀN TAY ROBOT ĐẶT ĐÈ LÊN VIỀN KHUNG XÁC MINH        */}
-      {/* - Bình thường: 2 tay bám chặt lên mép trên khung chứng chỉ             */}
-      {/* - Khi nhập mã (isPeeking): 2 tay giơ lên che ngang mặt nhưng để hở    */}
-      {/*   khe bên phải cho mắt phải của BIN lén nhìn!                         */}
-      {/* ===================================================================== */}
       <div className="relative z-30 -mt-5 flex w-full justify-between px-6">
-        {/* Bàn tay trái */}
         <div
           className="transition-all duration-300 ease-out"
           style={{
@@ -381,14 +341,12 @@ function BinRobotMascot({
         >
           <svg width="54" height="42" viewBox="0 0 60 46" className="drop-shadow-[0_6px_10px_rgba(15,23,42,0.22)]">
             <rect x="6" y="10" width="48" height="28" rx="14" fill="url(#binShellWhite)" stroke="#94a3b8" strokeWidth="2" />
-            {/* 3 ngón tay robot bám mép khung */}
             <rect x="13" y="4" width="8" height="16" rx="4" fill="#2563eb" />
             <rect x="26" y="2" width="8" height="18" rx="4" fill="#38bdf8" />
             <rect x="39" y="4" width="8" height="16" rx="4" fill="#2563eb" />
           </svg>
         </div>
 
-        {/* Bàn tay phải (hơi lệch sang phải để chừa khe cho mắt phải lén nhìn!) */}
         <div
           className="transition-all duration-300 ease-out"
           style={{
@@ -409,9 +367,6 @@ function BinRobotMascot({
   );
 }
 
-/**
- * Bộ Sticker Hoạt Hình Web3 & Văn Bằng Số bay lơ lửng
- */
 function FloatingWeb3Stickers({ offsetX, offsetY }: { offsetX: number; offsetY: number }) {
   return (
     <div className="pointer-events-none fixed inset-0 z-10 overflow-hidden">
@@ -484,9 +439,6 @@ function FloatingWeb3Stickers({ offsetX, offsetY }: { offsetX: number; offsetY: 
   );
 }
 
-/**
- * Thẻ Trắng Kính Mờ Nghiêng 3D (z-20: nằm đè lên thân BIN nhưng dưới 2 bàn tay của BIN)
- */
 function Tilt3DCard({
   children,
   className = "",
@@ -579,6 +531,9 @@ function RevealOnScroll({
 }
 
 export default function UserVerifyPortal() {
+  const navigate = useNavigate();
+  const [currentUser, setCurrentUser] = useState(() => getCurrentUser());
+
   const [mode, setMode] = useState<"code" | "file">("code");
   const [certCodeInput, setCertCodeInput] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -587,7 +542,6 @@ export default function UserVerifyPortal() {
   const [showAdvancedHash, setShowAdvancedHash] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
 
-  // Trạng thái kích hoạt trò "nhắm mắt nheo lén nhìn" của BIN khi focus vào ô nhập mã
   const [isTypingSecret, setIsTypingSecret] = useState(false);
 
   const [loading, setLoading] = useState(false);
@@ -618,9 +572,15 @@ export default function UserVerifyPortal() {
     };
   }, []);
 
+  const handleQuickLogout = () => {
+    logoutUser();
+    setCurrentUser(null);
+    navigate("/");
+  };
+
   const verifyHashOnChain = async (hashToCheck: string, txHash?: string) => {
     const provider = new JsonRpcProvider(SEPOLIA_RPC_URL);
-    const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
+    const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI.abi, provider);
 
     const [exists, rawStudentId, issuedAt, isValid] = await contract.verifyCertificate(hashToCheck);
     if (!exists) {
@@ -677,6 +637,7 @@ export default function UserVerifyPortal() {
         return;
       }
 
+      // Tự động tra cứu hợp nhất từ SQL Server + Smart Contract Sepolia
       const allRecords = await fetchAllCertificates();
       const onChainMatch = allRecords.find(
         (item) => item.certCode.trim().toLowerCase() === normalizedCode
@@ -826,9 +787,39 @@ export default function UserVerifyPortal() {
             <span className="text-lg font-black tracking-wider text-slate-900">CERT-CHAIN</span>
           </div>
 
-          <div className="flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50/90 px-3.5 py-1.5 text-xs font-bold text-blue-800">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
-            <span>Ethereum Sepolia</span>
+          <div className="flex items-center gap-3">
+            <div className="hidden items-center gap-2 rounded-full border border-blue-200 bg-blue-50/90 px-3.5 py-1.5 text-xs font-bold text-blue-800 sm:flex">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
+              <span>Ethereum Sepolia</span>
+            </div>
+
+            {currentUser ? (
+              <div className="flex items-center gap-2">
+                <Link
+                  to={currentUser.Role === "ADMIN" ? "/admin" : "/student"}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-blue-600 to-sky-500 px-4 py-2 text-xs font-extrabold text-white shadow-md shadow-blue-500/20 transition hover:opacity-95"
+                >
+                  <UserCheck className="h-3.5 w-3.5" />
+                  <span>{currentUser.Role === "ADMIN" ? "Trang Quản trị" : "Hồ sơ của tôi"}</span>
+                </Link>
+                <button
+                  type="button"
+                  onClick={handleQuickLogout}
+                  title="Đăng xuất"
+                  className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-white p-2 text-slate-600 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ) : (
+              <Link
+                to="/auth"
+                className="inline-flex items-center gap-1.5 rounded-full bg-gradient-to-r from-blue-600 to-sky-500 px-4 py-2 text-xs font-extrabold text-white shadow-md shadow-blue-500/20 transition hover:opacity-95"
+              >
+                <LogIn className="h-3.5 w-3.5" />
+                <span>Đăng nhập / Đăng ký</span>
+              </Link>
+            )}
           </div>
         </div>
       </header>
@@ -853,9 +844,7 @@ export default function UserVerifyPortal() {
           Xác thực tức thì bằng mã định danh hoặc tệp văn bằng gốc.
         </p>
 
-        {/* Cụm Robot BIN + Thẻ Xác Minh xếp lớp 3D */}
         <div className="relative mt-6 w-full">
-          {/* Chú Robot BIN (Thân z-10 trốn sau khung, 2 tay z-30 đặt lên viền khung) */}
           <BinRobotMascot
             mousePos={mousePos}
             isLoading={loading}
@@ -863,9 +852,7 @@ export default function UserVerifyPortal() {
             isPeeking={isTypingSecret}
           />
 
-          {/* Thẻ Trắng Kính Mờ (z-20 nằm giữa thân BIN và 2 tay BIN) */}
           <Tilt3DCard className="relative z-20 w-full rounded-3xl border border-blue-200/90 bg-white/95 p-6 shadow-[0_25px_65px_-15px_rgba(37,99,235,0.2)] backdrop-blur-2xl sm:p-8">
-            {/* Tabs chuyển chế độ */}
             <div className="mb-6 grid grid-cols-2 gap-1.5 rounded-2xl bg-slate-100 p-1.5 ring-1 ring-slate-200/80">
               <button
                 type="button"
@@ -970,7 +957,6 @@ export default function UserVerifyPortal() {
                     />
                   </div>
 
-                  {/* Ô nhập Mã xác thực (Security Key) — Kích hoạt BIN giở trò che mặt nhưng nheo 1 mắt lén nhìn! */}
                   <div className="relative">
                     <KeyRound className="pointer-events-none absolute top-1/2 left-4 h-4 w-4 -translate-y-1/2 text-blue-600" />
                     <input
@@ -1036,7 +1022,6 @@ export default function UserVerifyPortal() {
           </Tilt3DCard>
         </div>
 
-        {/* Thẻ Kết Quả Xác Minh */}
         {result && (
           <div
             ref={resultRef}

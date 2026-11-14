@@ -1,0 +1,42 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_28-32339a48d5e920b5fec6acc419c29da819b83c53",
+  "solcVersion": "0.8.28",
+  "solcLongVersion": "0.8.28+commit.7893614a",
+  "compilerType": "solc",
+  "userSourceNameMap": {
+    "ma-nguon-solidity/CertificateRegistry.sol": "project/ma-nguon-solidity/CertificateRegistry.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "cancun",
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode.linkReferences",
+            "evm.bytecode.object",
+            "evm.bytecode.opcodes",
+            "evm.bytecode.sourceMap",
+            "evm.deployedBytecode.immutableReferences",
+            "evm.deployedBytecode.linkReferences",
+            "evm.deployedBytecode.object",
+            "evm.deployedBytecode.opcodes",
+            "evm.deployedBytecode.sourceMap",
+            "evm.methodIdentifiers"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/ma-nguon-solidity/CertificateRegistry.sol": {
+        "content": "// SPDX-License-Identifier: MIT\r\npragma solidity ^0.8.28;\r\n\r\ncontract CertificateRegistry {\r\n    address public admin;\r\n\r\n    struct Certificate {\r\n        bytes32 certHash;      // Mã băm Keccak-256 của dữ liệu văn bằng\r\n        string studentId;      // Mã số sinh viên\r\n        uint256 issuedAt;      // Thời gian cấp (Timestamp)\r\n        bool isValid;          // Trạng thái hiệu lực (true = hợp lệ, false = đã thu hồi)\r\n    }\r\n\r\n    // Lưu trữ danh sách văn bằng theo mã băm\r\n    mapping(bytes32 => Certificate) private certificates;\r\n\r\n    // Sự kiện ghi log lên Blockchain để Frontend/Backend theo dõi\r\n    event CertificateIssued(bytes32 indexed certHash, string studentId, uint256 issuedAt);\r\n    event BatchCertificatesIssued(uint256 count, uint256 issuedAt);\r\n    event CertificateRevoked(bytes32 indexed certHash, uint256 revokedAt);\r\n\r\n    modifier onlyAdmin() {\r\n        require(msg.sender == admin, \"Chi nha truong (Admin) moi co quyen thuc hien\");\r\n        _;\r\n    }\r\n\r\n    constructor() {\r\n        admin = msg.sender; // Ví triển khai hợp đồng sẽ là Admin mặc định\r\n    }\r\n\r\n    // 1. Chức năng cấp phát văn bằng đơn lẻ\r\n    function issueCertificate(bytes32 _certHash, string memory _studentId) external onlyAdmin {\r\n        require(certificates[_certHash].issuedAt == 0, \"Van bang nay da ton tai tren he thong\");\r\n\r\n        certificates[_certHash] = Certificate({\r\n            certHash: _certHash,\r\n            studentId: _studentId,\r\n            issuedAt: block.timestamp,\r\n            isValid: true\r\n        });\r\n\r\n        emit CertificateIssued(_certHash, _studentId, block.timestamp);\r\n    }\r\n\r\n    // 2. Chức năng cấp phát văn bằng hàng loạt theo lô (Chỉ 1 giao dịch MetaMask)\r\n    function issueBatchCertificates(\r\n        bytes32[] calldata _certHashes,\r\n        string[] calldata _studentIds\r\n    ) external onlyAdmin {\r\n        require(_certHashes.length > 0, \"Danh sach chung chi rong\");\r\n        require(_certHashes.length == _studentIds.length, \"So luong ma bam va MSSV khong khop\");\r\n        require(_certHashes.length <= 100, \"Toi da 100 chung chi moi lo\");\r\n\r\n        for (uint256 i = 0; i < _certHashes.length; i++) {\r\n            bytes32 hash = _certHashes[i];\r\n            require(hash != bytes32(0), \"Ma bam khong hop le\");\r\n            require(certificates[hash].issuedAt == 0, \"Ton tai van bang da duoc cap truoc do\");\r\n\r\n            certificates[hash] = Certificate({\r\n                certHash: hash,\r\n                studentId: _studentIds[i],\r\n                issuedAt: block.timestamp,\r\n                isValid: true\r\n            });\r\n\r\n            emit CertificateIssued(hash, _studentIds[i], block.timestamp);\r\n        }\r\n\r\n        emit BatchCertificatesIssued(_certHashes.length, block.timestamp);\r\n    }\r\n\r\n    // 3. Chức năng thu hồi văn bằng (khi phát hiện sai sót hoặc gian lận)\r\n    function revokeCertificate(bytes32 _certHash) external onlyAdmin {\r\n        require(certificates[_certHash].issuedAt != 0, \"Van bang khong ton tai\");\r\n        require(certificates[_certHash].isValid, \"Van bang nay da bi thu hoi truoc do\");\r\n\r\n        certificates[_certHash].isValid = false;\r\n\r\n        emit CertificateRevoked(_certHash, block.timestamp);\r\n    }\r\n\r\n    // 4. Chức năng tra cứu và xác thực văn bằng (ai cũng có thể gọi, không tốn phí gas)\r\n    function verifyCertificate(bytes32 _certHash) external view returns (\r\n        bool exists,\r\n        string memory studentId,\r\n        uint256 issuedAt,\r\n        bool isValid\r\n    ) {\r\n        Certificate memory cert = certificates[_certHash];\r\n        if (cert.issuedAt == 0) {\r\n            return (false, \"\", 0, false);\r\n        }\r\n        return (true, cert.studentId, cert.issuedAt, cert.isValid);\r\n    }\r\n}"
+      }
+    }
+  }
+}
