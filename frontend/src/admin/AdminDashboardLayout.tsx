@@ -31,6 +31,10 @@ import {
   FileSpreadsheet,
   Download,
   Trash2,
+  GraduationCap,
+  Users,
+  Building2,
+  X,
 } from "lucide-react";
 import { CONTRACT_ADDRESS, CONTRACT_ABI } from "../ket-noi-blockchain/cau-hinh-hop-dong/contractConfig";
 import {
@@ -63,7 +67,7 @@ function formatLocalDate(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
-type AdminTab = "dashboard" | "manage" | "issue";
+type AdminTab = "dashboard" | "manage" | "courses" | "issue";
 type IssueMode = "single" | "batch";
 type DateFilterPreset = "today" | "7days" | "month" | "all" | "custom";
 
@@ -77,6 +81,16 @@ interface BatchPreviewRow {
   salt: string;
   certHash: string;
   error?: string;
+}
+
+interface CourseSummaryItem {
+  courseName: string;
+  issuerUnit: string;
+  total: number;
+  valid: number;
+  revoked: number;
+  latestIssueDate: string;
+  certificates: FullCertificateRecord[];
 }
 
 function AdminSidebarMascot({
@@ -156,7 +170,6 @@ export default function AdminDashboardLayout() {
   const [networkName, setNetworkName] = useState("");
   const [chainId, setChainId] = useState<number | null>(null);
   const [isAuthorizedAdmin, setIsAuthorizedAdmin] = useState(false);
-  const [contractAdminAddress, setContractAdminAddress] = useState("");
 
   const [records, setRecords] = useState<FullCertificateRecord[]>([]);
   const [loadingData, setLoadingData] = useState(false);
@@ -176,6 +189,10 @@ export default function AdminDashboardLayout() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "valid" | "revoked">("all");
+
+  // State cho trang Khóa học cấp phát
+  const [courseSearch, setCourseSearch] = useState("");
+  const [selectedCourseModal, setSelectedCourseModal] = useState<CourseSummaryItem | null>(null);
 
   // State cấp đơn lẻ
   const [certCode, setCertCode] = useState("");
@@ -252,7 +269,6 @@ export default function AdminDashboardLayout() {
 
       const contract = new Contract(CONTRACT_ADDRESS, CONTRACT_ABI.abi, provider);
       const onChainAdmin: string = await contract.admin();
-      setContractAdminAddress(onChainAdmin);
       setIsAuthorizedAdmin(accounts[0].toLowerCase() === onChainAdmin.toLowerCase());
     } catch (err: any) {
       setStatusMsg({ type: "error", text: err?.message || "Kết nối ví thất bại." });
@@ -482,7 +498,6 @@ export default function AdminDashboardLayout() {
         })
       );
 
-      // 1 giao dịch MetaMask duy nhất cho toàn bộ danh sách
       const tx = await contract.issueBatchCertificates(hashes, payloads);
       setStatusMsg({
         type: "success",
@@ -492,7 +507,6 @@ export default function AdminDashboardLayout() {
 
       await tx.wait();
 
-      // 1. Lưu bộ nhớ đệm cục bộ
       const savedRaw = localStorage.getItem(STORAGE_KEY);
       const localMap: Record<string, CertificateMetadata> = savedRaw ? JSON.parse(savedRaw) : {};
       for (const item of batchRows) {
@@ -509,7 +523,6 @@ export default function AdminDashboardLayout() {
       }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(localMap));
 
-      // 2. Gọi API Backend lưu hàng loạt vào SQL Server
       const batchPayload = batchRows.map((item) => ({
         certCode: item.certCode,
         studentCode: item.studentCode,
@@ -749,6 +762,54 @@ export default function AdminDashboardLayout() {
     return Object.values(map).sort((a, b) => b.total - a.total).slice(0, 5);
   }, [dashboardRecords]);
 
+  // Tổng hợp dữ liệu cho trang "Khóa học cấp phát"
+  const allCourseSummaries = useMemo<CourseSummaryItem[]>(() => {
+    const map: Record<string, CourseSummaryItem> = {};
+    for (const r of records) {
+      const key = (r.courseName || "Chưa phân loại").trim();
+      if (!map[key]) {
+        map[key] = {
+          courseName: key,
+          issuerUnit: r.issuerUnit || "Trường Đại học",
+          total: 0,
+          valid: 0,
+          revoked: 0,
+          latestIssueDate: r.issueDate || "",
+          certificates: [],
+        };
+      }
+      map[key].total += 1;
+      if (r.isValid) {
+        map[key].valid += 1;
+      } else {
+        map[key].revoked += 1;
+      }
+      if (r.issueDate && r.issueDate > map[key].latestIssueDate) {
+        map[key].latestIssueDate = r.issueDate;
+      }
+      map[key].certificates.push(r);
+    }
+    return Object.values(map).sort((a, b) => b.total - a.total);
+  }, [records]);
+
+  const filteredCourseSummaries = useMemo(() => {
+    const q = courseSearch.toLowerCase().trim();
+    if (!q) return allCourseSummaries;
+    return allCourseSummaries.filter(
+      (c) =>
+        c.courseName.toLowerCase().includes(q) ||
+        c.issuerUnit.toLowerCase().includes(q)
+    );
+  }, [allCourseSummaries, courseSearch]);
+
+  const activeModalCourse = useMemo(() => {
+    if (!selectedCourseModal) return null;
+    return (
+      allCourseSummaries.find((c) => c.courseName === selectedCourseModal.courseName) ||
+      selectedCourseModal
+    );
+  }, [selectedCourseModal, allCourseSummaries]);
+
   const filteredManageRecords = records.filter((item) => {
     const matchesStatus =
       statusFilter === "all" ||
@@ -826,6 +887,19 @@ export default function AdminDashboardLayout() {
 
           <button
             type="button"
+            onClick={() => setActiveTab("courses")}
+            className={`flex w-full items-center gap-3.5 rounded-2xl px-4 py-3 text-sm font-bold transition-all ${
+              activeTab === "courses"
+                ? "bg-gradient-to-r from-blue-600 to-sky-500 text-white shadow-lg shadow-blue-500/25"
+                : "text-slate-600 hover:bg-blue-50 hover:text-blue-700"
+            }`}
+          >
+            <GraduationCap className="h-5 w-5" />
+            Khóa học cấp phát
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveTab("issue")}
             className={`flex w-full items-center gap-3.5 rounded-2xl px-4 py-3 text-sm font-bold transition-all ${
               activeTab === "issue"
@@ -889,8 +963,8 @@ export default function AdminDashboardLayout() {
                     <span>{networkName}</span>
                   </div>
                   <div className="h-4 w-[1px] bg-slate-200" />
-                  <span className="font-mono text-xs font-bold text-slate-900">
-                    {walletAddress.slice(0, 6)}...{walletAddress.slice(-4)}
+                  <span className="font-mono text-xs font-bold text-slate-900" title="Địa chỉ ví đã được ẩn để bảo mật">
+                    0x••••...••••
                   </span>
                   <span
                     className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold ${
@@ -910,7 +984,7 @@ export default function AdminDashboardLayout() {
             <div className="mb-6 flex items-center gap-3 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-medium text-rose-800">
               <AlertTriangle className="h-5 w-5 shrink-0 text-rose-600" />
               <span>
-                Ví hiện tại không phải Admin của Smart Contract (<code className="font-mono font-bold">{contractAdminAddress}</code>).
+                Ví hiện tại không có quyền Quản trị viên (Admin) của Smart Contract. Vui lòng kết nối đúng ví được cấp quyền!
               </span>
             </div>
           )}
@@ -1199,7 +1273,7 @@ export default function AdminDashboardLayout() {
                       <div className="mt-4 border-t border-slate-100 pt-3 text-center">
                         <button
                           type="button"
-                          onClick={() => setActiveTab("manage")}
+                          onClick={() => setActiveTab("courses")}
                           className="text-xs font-extrabold text-blue-600 hover:underline"
                         >
                           Xem tất cả
@@ -1374,7 +1448,244 @@ export default function AdminDashboardLayout() {
               )}
 
               {/* ===================================================================== */}
-              {/* TRANG 3: CẤP CHỨNG CHỈ MỚI (ĐƠN LẺ & HÀNG LOẠT EXCEL)                 */}
+              {/* TRANG 3: KHÓA HỌC ĐÃ CẤP PHÁT                                         */}
+              {/* ===================================================================== */}
+              {activeTab === "courses" && (
+                <div>
+                  <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <h1 className="text-2xl font-black text-slate-900">Khóa Học Đã Cấp Phát</h1>
+                      <p className="text-xs font-medium text-slate-600">
+                        Thống kê chương trình đào tạo và danh sách học viên được cấp chứng chỉ theo từng khóa
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("issue")}
+                      className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-blue-600 to-sky-500 px-5 py-2.5 text-sm font-bold text-white shadow-md shadow-blue-500/20 hover:opacity-95"
+                    >
+                      <FilePlus2 className="h-4 w-4" />
+                      + Cấp chứng chỉ mới
+                    </button>
+                  </div>
+
+                  {/* 3 Thẻ thống kê nhanh */}
+                  <div className="mb-6 grid grid-cols-1 gap-5 sm:grid-cols-3">
+                    <div className="flex items-center gap-4 rounded-3xl border border-blue-200/80 bg-white/90 p-5 shadow-sm backdrop-blur-xl">
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-blue-100 text-blue-600">
+                        <GraduationCap className="h-6 w-6" />
+                      </div>
+                      <div>
+                        <div className="text-2xl font-black text-slate-900">{allCourseSummaries.length}</div>
+                        <div className="text-xs font-bold text-slate-600">Tổng khóa học đã cấp</div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-4 rounded-3xl border border-blue-200/80 bg-white/90 p-5 shadow-sm backdrop-blur-xl">
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-sky-100 text-sky-600">
+                        <Users className="h-6 w-6" />
+                      </div>
+                      <div>
+                        <div className="text-2xl font-black text-slate-900">{records.length}</div>
+                        <div className="text-xs font-bold text-slate-600">Tổng lượt học viên nhận bằng</div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-4 rounded-3xl border border-blue-200/80 bg-white/90 p-5 shadow-sm backdrop-blur-xl">
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-100 text-emerald-600">
+                        <Award className="h-6 w-6" />
+                      </div>
+                      <div>
+                        <div className="text-2xl font-black text-slate-900">
+                          {records.filter((r) => r.isValid).length}
+                        </div>
+                        <div className="text-xs font-bold text-slate-600">Chứng chỉ đang hiệu lực</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-3xl border border-blue-200/80 bg-white/95 p-6 shadow-sm backdrop-blur-xl">
+                    <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex flex-1 min-w-[260px] items-center gap-2.5 rounded-2xl border border-slate-300 bg-slate-50 px-4 py-2.5 focus-within:border-blue-600 focus-within:bg-white">
+                        <Search className="h-4 w-4 text-blue-600" />
+                        <input
+                          type="text"
+                          placeholder="Tìm tên khóa học hoặc đơn vị cấp..."
+                          value={courseSearch}
+                          onChange={(e) => setCourseSearch(e.target.value)}
+                          className="w-full bg-transparent text-sm font-medium text-slate-900 outline-none"
+                        />
+                      </div>
+                      <div className="text-xs font-bold text-slate-500">
+                        Hiển thị {filteredCourseSummaries.length} / {allCourseSummaries.length} khóa học
+                      </div>
+                    </div>
+
+                    {filteredCourseSummaries.length === 0 ? (
+                      <div className="py-12 text-center text-sm font-medium text-slate-500">
+                        Chưa có dữ liệu khóa học nào phù hợp.
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-3">
+                        {filteredCourseSummaries.map((course) => {
+                          const validRate =
+                            course.total > 0 ? Math.round((course.valid / course.total) * 100) : 0;
+                          return (
+                            <div
+                              key={course.courseName}
+                              className="flex flex-col justify-between rounded-2xl border border-blue-100 bg-gradient-to-b from-white to-blue-50/40 p-5 shadow-xs transition hover:-translate-y-0.5 hover:border-blue-300 hover:shadow-md"
+                            >
+                              <div>
+                                <div className="mb-3 flex items-start justify-between gap-2">
+                                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-blue-600">
+                                    <Award className="h-5 w-5" />
+                                  </div>
+                                  <span className="rounded-full bg-sky-100 px-2.5 py-1 text-[11px] font-extrabold text-sky-800">
+                                    {course.total} chứng chỉ
+                                  </span>
+                                </div>
+
+                                <h3 className="line-clamp-2 text-base font-extrabold text-slate-900">
+                                  {course.courseName}
+                                </h3>
+
+                                <div className="mt-2 flex items-center gap-1.5 text-xs font-medium text-slate-600">
+                                  <Building2 className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+                                  <span className="truncate">{course.issuerUnit}</span>
+                                </div>
+
+                                <div className="mt-1 flex items-center gap-1.5 text-xs font-medium text-slate-500">
+                                  <Calendar className="h-3.5 w-3.5 shrink-0 text-blue-500" />
+                                  <span>Cấp gần nhất: {course.latestIssueDate || "—"}</span>
+                                </div>
+
+                                {/* Thanh tỷ lệ hiệu lực */}
+                                <div className="mt-4">
+                                  <div className="mb-1 flex justify-between text-[11px] font-bold">
+                                    <span className="text-emerald-700">Hợp lệ: {course.valid}</span>
+                                    <span className="text-rose-600">Thu hồi: {course.revoked}</span>
+                                  </div>
+                                  <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                                    <div
+                                      className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-400"
+                                      style={{ width: `${validRate}%` }}
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="mt-5 flex items-center gap-2 border-t border-blue-100 pt-3.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedCourseModal(course)}
+                                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-600 px-3 py-2 text-xs font-bold text-white transition hover:bg-blue-700"
+                                >
+                                  <Users className="h-3.5 w-3.5" />
+                                  Xem học viên ({course.total})
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCourseName(course.courseName);
+                                    setIssuerUnit(course.issuerUnit);
+                                    setIssueMode("single");
+                                    setActiveTab("issue");
+                                  }}
+                                  title="Cấp thêm chứng chỉ cho khóa học này"
+                                  className="rounded-xl border border-blue-200 bg-white px-3 py-2 text-xs font-bold text-blue-700 transition hover:bg-blue-50"
+                                >
+                                  + Cấp thêm
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Modal xem chi tiết danh sách học viên của khóa học */}
+                  {activeModalCourse && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-xs">
+                      <div className="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-3xl border border-blue-200 bg-white shadow-2xl">
+                        <div className="flex items-start justify-between gap-4 border-b border-slate-200 bg-gradient-to-r from-blue-50 to-sky-50 px-6 py-5">
+                          <div>
+                            <div className="text-xs font-extrabold tracking-wider text-blue-600 uppercase">
+                              Danh sách chứng chỉ theo khóa học
+                            </div>
+                            <h3 className="mt-0.5 text-lg font-black text-slate-900">
+                              {activeModalCourse.courseName}
+                            </h3>
+                            <p className="mt-0.5 text-xs font-medium text-slate-600">
+                              Đơn vị cấp: <span className="font-bold">{activeModalCourse.issuerUnit}</span> • Tổng cộng:{" "}
+                              <span className="font-bold text-blue-700">{activeModalCourse.total}</span> chứng chỉ
+                            </p>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => setSelectedCourseModal(null)}
+                            className="rounded-xl border border-slate-200 bg-white p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+
+                        <div className="flex-1 overflow-auto p-6">
+                          <table className="w-full text-left text-sm">
+                            <thead>
+                              <tr className="border-b border-slate-200 text-xs font-extrabold text-slate-500 uppercase">
+                                <th className="pb-3">Mã CC</th>
+                                <th className="pb-3">MSSV</th>
+                                <th className="pb-3">Họ và tên</th>
+                                <th className="pb-3">Ngày cấp</th>
+                                <th className="pb-3">Trạng thái</th>
+                                <th className="pb-3 text-right">Thao tác</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100">
+                              {activeModalCourse.certificates.map((cert) => (
+                                <tr key={cert.certHash} className="hover:bg-blue-50/50">
+                                  <td className="py-3 font-mono text-xs font-extrabold text-blue-700">
+                                    {cert.certCode}
+                                  </td>
+                                  <td className="py-3 font-mono text-xs font-bold text-slate-600">
+                                    {cert.studentCode || "—"}
+                                  </td>
+                                  <td className="py-3 font-bold text-slate-900">{cert.recipientName}</td>
+                                  <td className="py-3 text-xs font-medium text-slate-600">{cert.issueDate}</td>
+                                  <td className="py-3">
+                                    <span
+                                      className={`inline-block rounded-lg px-2.5 py-0.5 text-[11px] font-bold text-white ${
+                                        cert.isValid ? "bg-emerald-600" : "bg-rose-600"
+                                      }`}
+                                    >
+                                      {cert.isValid ? "Còn hiệu lực" : "Đã thu hồi"}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 text-right whitespace-nowrap">
+                                    <Link
+                                      to={`/certificate/${encodeURIComponent(cert.certCode)}`}
+                                      target="_blank"
+                                      className="inline-flex items-center gap-1 rounded-xl bg-blue-100 px-3 py-1.5 text-xs font-bold text-blue-700 hover:bg-blue-200"
+                                    >
+                                      <Eye className="h-3.5 w-3.5" />
+                                      Xem bằng
+                                    </Link>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ===================================================================== */}
+              {/* TRANG 4: CẤP CHỨNG CHỈ MỚI (ĐƠN LẺ & HÀNG LOẠT EXCEL)                 */}
               {/* ===================================================================== */}
               {activeTab === "issue" && (
                 <div>
@@ -1386,7 +1697,6 @@ export default function AdminDashboardLayout() {
                       </p>
                     </div>
 
-                    {/* Bộ chuyển đổi chế độ Đơn lẻ / Hàng loạt */}
                     <div className="flex rounded-2xl border border-blue-200/80 bg-white/95 p-1 shadow-sm">
                       <button
                         type="button"
